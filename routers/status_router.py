@@ -3,6 +3,7 @@ import json
 
 from cache.status_cache import status_data
 from services.filter_service import filter_devices
+from services.status_service import get_status
 from models.request_models import DeviceSearchRequest
 
 router = APIRouter()
@@ -13,6 +14,36 @@ def home():
     return {
         "message": "TFiber Status API"
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NEW: STATUS ENGINE ENDPOINT
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/status-engine")
+def status_engine(request: dict):
+    """
+    NEW: Status engine endpoint (unified query interface)
+    
+    Query examples:
+      - {"query": "Status of Sangareddy District"}
+      - {"query": "Status of Nagalgidda Mandal"}
+      - {"query": "Status of OLT001"}
+      - {"query": "Status of 10.10.20.3"}
+      - {"query": "Status of LGD 278693"}
+    
+    This is the main entry point for the status engine.
+    Returns compressed JSON with scope-based aggregation.
+    """
+    
+    query = request.get("query", "")
+    response = get_status(query)
+    return response
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LEGACY: SUMMARY & DEVICE SEARCH (kept for backward compatibility)
+# ══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/summary")
 def summary():

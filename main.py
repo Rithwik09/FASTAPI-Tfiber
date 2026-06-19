@@ -32,15 +32,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    lifespan=lifespan
+    title="TFiber Status Engine",
+    description="Comprehensive network status and monitoring API",
+    version="2.0.0"
 )
 
+# Core routers
 app.include_router(status_router)
 app.include_router(bandwidth_router)
 app.include_router(topology_router)
-app.include_router(
-    resolver_router
-)
+app.include_router(resolver_router)
 
 
 if __name__ == "__main__":
