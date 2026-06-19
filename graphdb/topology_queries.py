@@ -1,4 +1,4 @@
-from neo4j.connection import driver
+from graphdb.connection import driver
 
 
 def get_upstream_path(device_uid):

@@ -1,12 +1,12 @@
 import re
 
-from neo4j.device_queries import (
+from graphdb.device_queries import (
     get_device_by_ip,
     get_device_by_hostname,
     get_device_by_serial
 )
 
-from neo4j.district_queries import (
+from graphdb.district_queries import (
     get_district
 )
 
