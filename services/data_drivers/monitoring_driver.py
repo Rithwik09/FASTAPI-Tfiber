@@ -58,20 +58,22 @@ def fetch_device_status_batch(hostnames: list[str]) -> dict[str, dict]:
     """
     all_devices = fetch_all_device_status()
     
-    # Create lookup dictionary
-    device_lookup = {
-        d.get("hostname", "").upper(): d
-        for d in all_devices
-    }
+    device_lookup = {}
+    for device in all_devices:
+        for key in ("hostname", "Hostname", "OLT", "networkname"):
+            value = str(device.get(key, "")).upper()
+            if value:
+                device_lookup[value] = device
     
     # Filter to requested hostnames
     result = {}
     for hostname in hostnames:
-        if hostname.upper() in device_lookup:
-            result[hostname.upper()] = device_lookup[hostname.upper()]
+        hostname_upper = str(hostname).upper()
+        if hostname_upper in device_lookup:
+            result[hostname_upper] = device_lookup[hostname_upper]
         else:
-            result[hostname.upper()] = {
-                "hostname": hostname.upper(),
+            result[hostname_upper] = {
+                "hostname": hostname_upper,
                 "SystemDown": "UNKNOWN",
                 "status": "NOT_FOUND"
             }
@@ -100,7 +102,12 @@ def classify_device_type(device: dict) -> str:
     
     Returns: OLT, ONT, Router, Switch, UPS, Other
     """
-    hostname = device.get("hostname", "").upper()
+    hostname = str(
+        device.get("hostname")
+        or device.get("Hostname")
+        or device.get("OLT")
+        or ""
+    ).upper()
     vendor = device.get("VENDOR", "").upper()
     ems_type = device.get("EMS_TYPE", "").upper()
     

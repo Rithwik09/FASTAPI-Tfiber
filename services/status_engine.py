@@ -1,185 +1,141 @@
-"""
-Status Engine - Main orchestrator
-Coordinates: Intent → Resolver → Neo4j → Monitoring → Aggregation → LLM Response
-"""
-
-from services.intent_parser import parse_intent
+from services.intent_parser import parse_status_query
 from services.resolver_service import resolve_entity
-from services.data_drivers.neo4j_driver import (
-    get_devices_by_district,
-    get_devices_by_mandal,
-    get_devices_by_location,
-    get_devices_by_lgd,
-    get_services_for_device
+from services.data_drivers.graph_driver import (
+    count_affected_services,
+    get_devices_for_scope,
 )
 from services.data_drivers.monitoring_driver import (
+    MonitoringAPIError,
     fetch_device_status_batch,
-    MonitoringAPIError
 )
-from services.data_drivers.aggregator_driver import (
-    aggregate_status,
-    compress_for_llm
-)
-from models.status_models import StatusResponse, AggregatedStatus
+from services.data_drivers.aggregator_driver import aggregate_status
+from services.data_drivers.compression_driver import compress_status
 
 
 class StatusEngineError(Exception):
-    """Status engine error"""
     pass
 
 
-def get_status(query: str) -> StatusResponse:
-    """
-    Main entry point: Get comprehensive status for any entity
-    
-    Flow:
-        1. Parse intent from query
-        2. Resolve entity (validate existence)
-        3. Query Neo4j to get devices
-        4. Fetch device status from monitoring API
-        5. Aggregate and compress data
-        6. Return clean JSON for LLM
-    """
-    
+def get_status(query: str) -> dict:
     try:
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 1: PARSE INTENT
-        # ─────────────────────────────────────────────────────────────────────
-        
-        intent = parse_intent(query)
-        print(f"[Intent] Type: {intent.intent_type}, Entity: {intent.entity_type} ({intent.entity_name})")
-        
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 2: RESOLVE ENTITY (validate it exists)
-        # ─────────────────────────────────────────────────────────────────────
-        
-        resolved = resolve_entity(intent.entity_name)
-        
-        if resolved.get("entity_type") == "UNKNOWN":
-            return StatusResponse(
-                success=False,
-                error=f"Could not resolve entity: {intent.entity_name}"
-            )
-        
-        print(f"[Resolver] Entity resolved: {resolved}")
-        
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 3: QUERY NEO4J FOR DEVICES
-        # ─────────────────────────────────────────────────────────────────────
-        
-        hostnames = _get_devices_for_entity(intent.entity_type, intent.entity_name)
-        
+        intent = parse_status_query(query)
+
+        if intent.intent_type != "STATUS":
+            return {
+                "success": False,
+                "status": "UNSUPPORTED_INTENT",
+                "intent": intent.intent_type,
+                "error": f"{intent.intent_type} is not implemented on /status yet",
+            }
+
+        if not intent.entity_name:
+            return {
+                "success": False,
+                "status": "UNRESOLVED",
+                "error": "No entity found in query",
+            }
+
+        resolved = resolve_entity(intent.entity_name, intent.intent_type)
+
+        if resolved.get("status") == "ambiguous":
+            return _ambiguous_response(resolved)
+
+        if resolved.get("status") != "resolved":
+            return {
+                "success": False,
+                "status": "UNRESOLVED",
+                "intent": _intent_payload(intent),
+                "error": resolved.get("error", "Entity could not be resolved"),
+            }
+
+        hostnames = get_devices_for_scope(resolved)
+
         if not hostnames:
-            return StatusResponse(
-                success=False,
-                error=f"No devices found for {intent.entity_type}: {intent.entity_name}",
-                data=AggregatedStatus(
-                    entity_type=intent.entity_type,
-                    entity_name=intent.entity_name,
-                    overall_health="UNKNOWN",
-                    total_devices=0,
-                    devices_up=0,
-                    devices_down=0,
-                    availability=0.0,
-                    critical_alerts=0,
-                    affected_services=0
-                )
+            empty = aggregate_status(
+                entity_type=resolved.get("entity_type"),
+                entity_name=resolved.get("entity_name"),
+                scope=resolved.get("scope_level", "UNKNOWN"),
+                devices=[],
             )
-        
-        print(f"[Neo4j] Found {len(hostnames)} devices")
-        
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 4: FETCH DEVICE STATUS FROM MONITORING API
-        # ─────────────────────────────────────────────────────────────────────
-        
-        device_status = fetch_device_status_batch(hostnames)
-        devices = list(device_status.values())
-        
-        print(f"[Monitoring] Fetched status for {len(devices)} devices")
-        
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 5: AGGREGATE AND COMPRESS
-        # ─────────────────────────────────────────────────────────────────────
-        
+            return {
+                "success": False,
+                "status": "NO_DEVICES",
+                "intent": _intent_payload(intent),
+                "resolver_context": _resolver_context(resolved),
+                "data": compress_status(resolved, empty, []),
+                "error": "No devices found for resolved entity",
+            }
+
+        monitoring_by_hostname = fetch_device_status_batch(hostnames)
+        devices = list(monitoring_by_hostname.values())
+        affected_services = count_affected_services(devices)
+
         aggregated = aggregate_status(
-            intent.entity_type,
-            intent.entity_name,
-            devices
+            entity_type=resolved.get("entity_type"),
+            entity_name=resolved.get("entity_name"),
+            scope=resolved.get("scope_level", "UNKNOWN"),
+            devices=devices,
+            affected_services=affected_services,
         )
-        
-        print(f"[Aggregation] Health: {aggregated.overall_health}, " +
-              f"Up: {aggregated.devices_up}/{aggregated.total_devices}")
-        
-        # ─────────────────────────────────────────────────────────────────────
-        # STEP 6: RETURN CLEAN JSON
-        # ─────────────────────────────────────────────────────────────────────
-        
-        return StatusResponse(
-            success=True,
-            data=aggregated,
-            raw_device_count=len(devices)
-        )
-    
-    except MonitoringAPIError as e:
-        return StatusResponse(
-            success=False,
-            error=f"Monitoring API error: {str(e)}"
-        )
-    
-    except Exception as e:
-        return StatusResponse(
-            success=False,
-            error=f"Status engine error: {str(e)}"
-        )
+        compressed = compress_status(resolved, aggregated, devices)
+
+        return {
+            "success": True,
+            "status": "OK",
+            "intent": _intent_payload(intent),
+            "resolver_context": _resolver_context(resolved),
+            "raw_device_count": len(devices),
+            "data": compressed,
+        }
+
+    except MonitoringAPIError as exc:
+        return {
+            "success": False,
+            "status": "MONITORING_ERROR",
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "status": "ENGINE_ERROR",
+            "error": f"Status engine error: {exc}",
+        }
 
 
-def _get_devices_for_entity(entity_type: str, entity_name: str) -> list[str]:
-    """
-    Get device list based on entity type
-    """
-    
-    if entity_type == "DISTRICT":
-        return get_devices_by_district(entity_name)
-    
-    elif entity_type == "MANDAL":
-        return get_devices_by_mandal(entity_name)
-    
-    elif entity_type == "LOCATION":
-        return get_devices_by_location(entity_name)
-    
-    elif entity_type == "LGD":
-        return get_devices_by_lgd(entity_name)
-    
-    elif entity_type == "DEVICE":
-        return [entity_name]
-    
-    elif entity_type == "IP":
-        # For IP address, resolve to device first
-        resolved = resolve_entity(entity_name)
-        if resolved.get("matches"):
-            return [d.get("hostname") for d in resolved["matches"]]
-        return []
-    
-    else:
-        raise StatusEngineError(f"Unknown entity type: {entity_type}")
+def _ambiguous_response(resolved: dict) -> dict:
+    return {
+        "success": False,
+        "status": "AMBIGUOUS",
+        "entity_type": resolved.get("entity_type"),
+        "entity_name": resolved.get("entity_name"),
+        "lookup_type": resolved.get("lookup_type"),
+        "candidates": resolved.get("candidates", []),
+        "error": resolved.get("error", "Multiple matching entities found"),
+    }
+
+
+def _intent_payload(intent) -> dict:
+    return {
+        "intent": intent.intent_type,
+        "entity_type": intent.entity_type,
+        "entity_name": intent.entity_name,
+    }
+
+
+def _resolver_context(resolved: dict) -> dict:
+    return {
+        "entity_type": resolved.get("entity_type"),
+        "entity_name": resolved.get("entity_name"),
+        "lookup_type": resolved.get("lookup_type"),
+        "scope": resolved.get("scope_level"),
+        "confidence": resolved.get("confidence"),
+        "canonical_id": resolved.get("canonical_id"),
+    }
 
 
 def get_device_impact(hostname: str) -> dict:
-    """
-    Get cascading impact of a device failure
-    
-    Returns:
-        {
-            "device": {...},
-            "affected_services": [...],
-            "affected_users": N
-        }
-    """
-    
-    services = get_services_for_device(hostname)
-    
     return {
         "device": hostname,
-        "affected_services": services,
-        "affected_users": len(services) * 100  # Placeholder
+        "status": "NOT_IMPLEMENTED",
+        "message": "Impact analysis will be handled by /impact-analysis",
     }

@@ -1,141 +1,147 @@
 import re
-from typing import Optional, Dict, Any
+from dataclasses import dataclass, field
+from typing import Any
 
 
+@dataclass
 class Intent:
-    """Parsed user intent"""
-    def __init__(self, intent_type: str, entity_type: str, entity_name: str, **kwargs):
-        self.intent_type = intent_type  # STATUS, AVAILABILITY, SERVICE, IMPACT, TOPOLOGY
-        self.entity_type = entity_type  # DISTRICT, MANDAL, LOCATION, DEVICE, IP, SERVICE
-        self.entity_name = entity_name
-        self.params = kwargs
+    intent_type: str
+    entity_type: str
+    entity_name: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+INTENT_KEYWORDS = {
+    "AVAILABILITY": ("availability", "uptime"),
+    "SERVICE": ("service status", "service"),
+    "IMPACT": ("impact", "root cause", "rca", "cascading"),
+    "TOPOLOGY": ("topology", "path", "trace"),
+}
+
+SCOPE_WORDS = {
+    "district": "DISTRICT",
+    "mandal": "MANDAL",
+    "block": "MANDAL",
+    "location": "LOCATION",
+    "village": "LOCATION",
+}
+
+DEVICE_PREFIXES = (
+    "OLT",
+    "ONT",
+    "RTR",
+    "ROUTER",
+    "SW",
+    "SWITCH",
+    "UPS",
+    "GI",
+)
+
+
+def parse_status_query(query: str) -> Intent:
+    """Parse the user question without resolving the entity."""
+    normalized = " ".join((query or "").strip().split())
+    intent_type = _detect_intent(normalized)
+    entity_type, entity_name = extract_entity(normalized, intent_type)
+
+    return Intent(
+        intent_type=intent_type,
+        entity_type=entity_type,
+        entity_name=entity_name,
+    )
 
 
 def parse_intent(query: str) -> Intent:
-    """
-    Parse user query to extract intent and entity
-    
-    Examples:
-        "Status of Sangareddy District" → STATUS, DISTRICT, SANGAREDDY
-        "Availability of Nagalgidda Mandal" → AVAILABILITY, MANDAL, NAGALGIDDA
-        "Service status 123456" → SERVICE, SERVICE, 123456
-        "Root cause of OLT001" → IMPACT, DEVICE, OLT001
-        "Status of 10.10.20.3" → STATUS, IP, 10.10.20.3
-    """
-    
-    query_lower = query.lower().strip()
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # INTENT DETECTION
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    intent_type = "STATUS"  # default
-    
-    if "availability" in query_lower:
-        intent_type = "AVAILABILITY"
-    elif "service status" in query_lower or "service" in query_lower:
-        intent_type = "SERVICE"
-    elif "root cause" in query_lower or "impact" in query_lower or "cascading" in query_lower:
-        intent_type = "IMPACT"
-    elif "topology" in query_lower or "path" in query_lower:
-        intent_type = "TOPOLOGY"
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # ENTITY TYPE & NAME EXTRACTION
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    entity_type, entity_name = extract_entity(query)
-    
-    return Intent(intent_type, entity_type, entity_name)
+    """Backward-compatible name used by older code."""
+    return parse_status_query(query)
 
 
-def extract_entity(query: str) -> tuple[str, str]:
-    """
-    Extract entity type and name from query
-    
-    Returns:
-        (entity_type, entity_name)
-    """
-    
-    query_lower = query.lower()
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # IP ADDRESS
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    ip_pattern = r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
-    ip_match = re.search(ip_pattern, query)
-    
+def extract_entity(query: str, intent_type: str = "STATUS") -> tuple[str, str]:
+    if not query:
+        return "UNKNOWN", ""
+
+    ip_match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", query)
     if ip_match:
-        return ("IP", ip_match.group())
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # SERVICE ID (numeric)
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    if "service" in query_lower:
-        service_match = re.search(r"service\s+(?:id\s+)?(\d+)", query_lower)
-        if service_match:
-            return ("SERVICE", service_match.group(1))
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # LGD CODE
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    if "lgd" in query_lower:
-        lgd_match = re.search(r"lgd\s+(?:code\s+)?(\d+)", query_lower)
-        if lgd_match:
-            return ("LGD", lgd_match.group(1))
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # DEVICE HOSTNAME (e.g., OLT001, ONT-XYZ)
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    device_pattern = r"(?:OLT|ONT|ROUTER|SWITCH|UPS)[\-\d\w]+"
-    device_match = re.search(device_pattern, query, re.IGNORECASE)
-    
+        return "IP", ip_match.group(0)
+
+    service_match = re.search(
+        r"\bservice(?:\s+status)?(?:\s+id)?\s+([A-Za-z0-9_-]+)\b",
+        query,
+        re.IGNORECASE,
+    )
+    if intent_type == "SERVICE" and service_match:
+        return "SERVICE", service_match.group(1).upper()
+
+    lgd_match = re.search(r"\blgd(?:\s+code)?\s+(\d+)\b", query, re.IGNORECASE)
+    if lgd_match:
+        return "LGD", lgd_match.group(1)
+
+    device_match = _match_device_name(query)
     if device_match:
-        return ("DEVICE", device_match.group().upper())
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # DISTRICT / MANDAL / LOCATION
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    # Extract text after "of" (e.g., "Status of Sangareddy District")
-    of_pattern = r"(?:of|in|for)\s+([A-Za-z\s]+?)(?:\s+(?:district|mandal|location|block))?$"
-    of_match = re.search(of_pattern, query_lower)
-    
-    if of_match:
-        entity_name = of_match.group(1).strip()
-        
-        # Determine if district, mandal, or location
-        if "district" in query_lower:
-            return ("DISTRICT", entity_name)
-        elif "mandal" in query_lower or "block" in query_lower:
-            return ("MANDAL", entity_name)
-        elif "location" in query_lower:
-            return ("LOCATION", entity_name)
-        else:
-            return ("DISTRICT", entity_name)  # default to district
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # Fallback: extract longest capitalized sequence
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    words = query.split()
-    capitalized = [w for w in words if w[0].isupper()]
-    
-    if capitalized:
-        entity_name = " ".join(capitalized)
-        
-        # Heuristic: if it ends with "District", "Mandal", etc., use that type
-        if query_lower.endswith("district"):
-            return ("DISTRICT", entity_name)
-        elif query_lower.endswith("mandal") or query_lower.endswith("block"):
-            return ("MANDAL", entity_name)
-        elif query_lower.endswith("location"):
-            return ("LOCATION", entity_name)
-        else:
-            return ("UNKNOWN", entity_name)
-    
-    return ("UNKNOWN", "")
+        return "DEVICE", device_match.upper()
+
+    scoped_entity = _extract_scoped_entity(query)
+    if scoped_entity:
+        return scoped_entity
+
+    candidate = _strip_question_words(query)
+    if candidate:
+        return "UNKNOWN", candidate.upper()
+
+    return "UNKNOWN", ""
+
+
+def _detect_intent(query: str) -> str:
+    query_lower = query.lower()
+
+    for intent_type, keywords in INTENT_KEYWORDS.items():
+        if any(keyword in query_lower for keyword in keywords):
+            return intent_type
+
+    return "STATUS"
+
+
+def _match_device_name(query: str) -> str | None:
+    for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_-]*\d[A-Za-z0-9_-]*\b", query):
+        upper = token.upper()
+        if upper.startswith(DEVICE_PREFIXES):
+            return upper
+
+    return None
+
+
+def _extract_scoped_entity(query: str) -> tuple[str, str] | None:
+    query_lower = query.lower()
+    scope_type = None
+
+    for scope_word, entity_type in SCOPE_WORDS.items():
+        if re.search(rf"\b{scope_word}\b", query_lower):
+            scope_type = entity_type
+            break
+
+    cleaned = _strip_question_words(query)
+
+    if scope_type:
+        cleaned = re.sub(
+            r"\b(district|mandal|block|location|village)\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+        return scope_type, cleaned.upper()
+
+    if cleaned:
+        return "DISTRICT", cleaned.upper()
+
+    return None
+
+
+def _strip_question_words(query: str) -> str:
+    cleaned = re.sub(
+        r"\b(status|availability|uptime|of|in|for|the|please|show|give|get|what|is)\b",
+        " ",
+        query,
+        flags=re.IGNORECASE,
+    )
+    cleaned = " ".join(cleaned.split())
+    return cleaned.strip(" ?")

@@ -3,8 +3,9 @@ import json
 
 from cache.status_cache import status_data
 from services.filter_service import filter_devices
-from services.status_service import get_status
+from services.status_engine import get_status
 from models.request_models import DeviceSearchRequest
+from models.status_models import StatusRequest
 
 router = APIRouter()
 
@@ -20,10 +21,10 @@ def home():
 # NEW: STATUS ENGINE ENDPOINT
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/status-engine")
-def status_engine(request: dict):
+@router.post("/status")
+def status(request: StatusRequest):
     """
-    NEW: Status engine endpoint (unified query interface)
+    Unified status endpoint.
     
     Query examples:
       - {"query": "Status of Sangareddy District"}
@@ -32,13 +33,15 @@ def status_engine(request: dict):
       - {"query": "Status of 10.10.20.3"}
       - {"query": "Status of LGD 278693"}
     
-    This is the main entry point for the status engine.
     Returns compressed JSON with scope-based aggregation.
     """
-    
-    query = request.get("query", "")
-    response = get_status(query)
-    return response
+    return get_status(request.query)
+
+
+@router.post("/status-engine")
+def status_engine(request: StatusRequest):
+    """Backward-compatible alias for /status."""
+    return get_status(request.query)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

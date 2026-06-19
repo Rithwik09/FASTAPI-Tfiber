@@ -75,11 +75,15 @@ def get_devices_by_location(location_code: str) -> list[str]:
     with driver.session() as session:
         result = session.run(
             """
-            MATCH (l:Location{code: $code})
-            -[:HAS_DEVICE]->(dev)
-            RETURN collect(dev.hostname) as hostnames
+            MATCH (l:Location)
+            WHERE toLower(coalesce(l.code, "")) = toLower($code)
+               OR toLower(coalesce(l.name, "")) = toLower($code)
+               OR toString(l.lgd_code) = $code
+               OR toString(id(l)) = $code
+            MATCH (l)-[:HAS_DEVICE]->(dev)
+            RETURN collect(DISTINCT dev.hostname) as hostnames
             """,
-            {"code": location_code.upper()}
+            {"code": str(location_code)}
         )
         
         record = result.single()

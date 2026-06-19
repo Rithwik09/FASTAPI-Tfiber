@@ -11,3 +11,7 @@ driver = GraphDatabase.driver(
         os.getenv("NEO4J_PASSWORD")
     )
 )
+
+
+def get_driver():
+    return driver
