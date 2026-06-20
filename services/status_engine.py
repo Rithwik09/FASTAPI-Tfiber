@@ -6,7 +6,7 @@ from services.data_drivers.graph_driver import (
 )
 from services.data_drivers.monitoring_driver import (
     MonitoringAPIError,
-    fetch_device_status_batch,
+    fetch_devices_for_resolved_scope,
 )
 from services.data_drivers.aggregator_driver import aggregate_status
 from services.data_drivers.compression_driver import compress_status
@@ -35,7 +35,7 @@ def get_status(query: str) -> dict:
                 "error": "No entity found in query",
             }
 
-        resolved = resolve_entity(intent.entity_name, intent.intent_type)
+        resolved, resolver_error = _resolve_or_fallback(intent)
 
         if resolved.get("status") == "ambiguous":
             return _ambiguous_response(resolved)
@@ -48,9 +48,20 @@ def get_status(query: str) -> dict:
                 "error": resolved.get("error", "Entity could not be resolved"),
             }
 
-        hostnames = get_devices_for_scope(resolved)
+        graph_hostnames = []
+        graph_warning = None
+        if not resolver_error:
+            try:
+                graph_hostnames = get_devices_for_scope(resolved)
+            except Exception as exc:
+                graph_warning = f"Neo4j graph lookup unavailable: {exc}"
 
-        if not hostnames:
+        devices, inventory_source = fetch_devices_for_resolved_scope(
+            resolved,
+            graph_hostnames,
+        )
+
+        if not devices:
             empty = aggregate_status(
                 entity_type=resolved.get("entity_type"),
                 entity_name=resolved.get("entity_name"),
@@ -62,13 +73,18 @@ def get_status(query: str) -> dict:
                 "status": "NO_DEVICES",
                 "intent": _intent_payload(intent),
                 "resolver_context": _resolver_context(resolved),
+                "resolver_warning": resolver_error,
+                "graph_warning": graph_warning,
+                "inventory_source": inventory_source,
                 "data": compress_status(resolved, empty, []),
-                "error": "No devices found for resolved entity",
+                "error": "No devices found in Neo4j relationships or Status API inventory",
             }
 
-        monitoring_by_hostname = fetch_device_status_batch(hostnames)
-        devices = list(monitoring_by_hostname.values())
-        affected_services = count_affected_services(devices)
+        affected_services = 0
+        try:
+            affected_services = count_affected_services(devices)
+        except Exception as exc:
+            graph_warning = graph_warning or f"Neo4j service lookup unavailable: {exc}"
 
         aggregated = aggregate_status(
             entity_type=resolved.get("entity_type"),
@@ -84,6 +100,9 @@ def get_status(query: str) -> dict:
             "status": "OK",
             "intent": _intent_payload(intent),
             "resolver_context": _resolver_context(resolved),
+            "resolver_warning": resolver_error,
+            "graph_warning": graph_warning,
+            "inventory_source": inventory_source,
             "raw_device_count": len(devices),
             "data": compressed,
         }
@@ -112,6 +131,34 @@ def _ambiguous_response(resolved: dict) -> dict:
         "candidates": resolved.get("candidates", []),
         "error": resolved.get("error", "Multiple matching entities found"),
     }
+
+
+def _resolve_or_fallback(intent) -> tuple[dict, str | None]:
+    try:
+        return resolve_entity(intent.entity_name, intent.intent_type), None
+    except Exception as exc:
+        return {
+            "status": "resolved",
+            "intent": intent.intent_type,
+            "entity_type": intent.entity_type,
+            "entity_name": intent.entity_name,
+            "lookup_type": "STATUS_API_FALLBACK",
+            "confidence": 0.5,
+            "scope_level": _scope_for_entity_type(intent.entity_type),
+            "requires_monitoring": True,
+            "requires_topology": False,
+            "context": {},
+        }, f"Neo4j resolver unavailable: {exc}"
+
+
+def _scope_for_entity_type(entity_type: str) -> str:
+    if entity_type in {"DISTRICT", "MANDAL", "LOCATION", "DEVICE"}:
+        return entity_type
+
+    if entity_type in {"IP", "LGD"}:
+        return "DEVICE" if entity_type == "IP" else "LOCATION"
+
+    return "UNKNOWN"
 
 
 def _intent_payload(intent) -> dict:

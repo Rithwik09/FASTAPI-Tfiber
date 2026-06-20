@@ -5,6 +5,7 @@ All routers import the singleton `topo` — no repeated file I/O.
 """
 
 import logging
+import threading
 import pandas as pd
 from pathlib import Path
 
@@ -34,7 +35,13 @@ class TopologyData:
         # Main pre-joined table (Nodes + Location + ONT2OLT + OLT2Router)
         self.merged: pd.DataFrame = pd.DataFrame()
 
+        # Fast device identity lookups used to enrich Status API records.
+        self.node_type_by_serial: dict[str, str] = {}
+        self.node_type_by_ip: dict[str, str] = {}
+        self.node_type_by_hostname: dict[str, str] = {}
+
         self._loaded = False
+        self._load_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public
@@ -51,9 +58,65 @@ class TopologyData:
         self.service = xl["Service"].copy()
         self.child2parent = xl["Child2Parent"].copy()
 
+        self._build_device_indexes()
         self.merged = self._build_merged()
         self._loaded = True
         logger.info("Topology loaded — %d devices in merged table", len(self.merged))
+
+    def ensure_loaded(self) -> None:
+        """Load the workbook once, including when used outside FastAPI startup."""
+        if self._loaded:
+            return
+
+        with self._load_lock:
+            if not self._loaded:
+                self.load()
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def resolve_device_type(self, device: dict) -> str | None:
+        """Resolve a Status API record to its authoritative topology node type."""
+        self.ensure_loaded()
+
+        api_type = _normalize_identifier(
+            device.get("ConfigurationItemType")
+            or device.get("ConfigurationItemSubType")
+        )
+        serial = _normalize_identifier(
+            device.get("SerialNumber")
+            or device.get("serial_number")
+            or device.get("serial")
+        )
+        ip_address = _normalize_identifier(
+            device.get("IPAddress")
+            or device.get("ip_address")
+            or device.get("ip")
+        )
+        hostname = _normalize_identifier(
+            device.get("hostname")
+            or device.get("Hostname")
+            or device.get("DisplayName")
+            or device.get("LOGICAL_NAME")
+        )
+
+        # ONT IP addresses are not reliable inventory join keys. Serial number is.
+        if api_type in {"ONT", "ONT DEVICE"}:
+            return self.node_type_by_serial.get(serial)
+
+        # OLT Device records also represent routers in the monitoring inventory.
+        if api_type in {"OLT", "OLT DEVICE", "DEVICE"}:
+            return (
+                self.node_type_by_ip.get(ip_address)
+                or self.node_type_by_hostname.get(hostname)
+            )
+
+        return (
+            self.node_type_by_serial.get(serial)
+            or self.node_type_by_ip.get(ip_address)
+            or self.node_type_by_hostname.get(hostname)
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -112,6 +175,62 @@ class TopologyData:
         )
 
         return step3
+
+    def _build_device_indexes(self) -> None:
+        self.node_type_by_serial = _build_unique_index(
+            self.nodes,
+            identifier_column="Serial No",
+        )
+        self.node_type_by_ip = _build_unique_index(
+            self.nodes,
+            identifier_column="IP Address",
+        )
+        self.node_type_by_hostname = _build_unique_index(
+            self.nodes,
+            identifier_column="Host Name",
+        )
+
+
+INVALID_IDENTIFIERS = {
+    "",
+    "-",
+    "0",
+    "NA",
+    "N/A",
+    "NAN",
+    "NONE",
+    "NULL",
+    "DATANA",
+}
+
+
+def _normalize_identifier(value) -> str:
+    normalized = str(value or "").strip().upper()
+    return "" if normalized in INVALID_IDENTIFIERS else normalized
+
+
+def _build_unique_index(
+    nodes: pd.DataFrame,
+    identifier_column: str,
+) -> dict[str, str]:
+    """Index only identifiers that map unambiguously to one node type."""
+    candidates: dict[str, set[str]] = {}
+
+    for identifier, node_type in zip(
+        nodes[identifier_column],
+        nodes["Node Type"],
+    ):
+        key = _normalize_identifier(identifier)
+        value = str(node_type or "").strip()
+        if not key or not value or value.upper() == "NAN":
+            continue
+        candidates.setdefault(key, set()).add(value)
+
+    return {
+        identifier: next(iter(node_types))
+        for identifier, node_types in candidates.items()
+        if len(node_types) == 1
+    }
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────

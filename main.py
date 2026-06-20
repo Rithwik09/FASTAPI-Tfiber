@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
 
     await asyncio.get_event_loop().run_in_executor(
         None,
-        topo.load
+        topo.ensure_loaded
     )
 
     asyncio.create_task(
@@ -34,7 +34,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TFiber Status Engine",
     description="Comprehensive network status and monitoring API",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # Core routers
