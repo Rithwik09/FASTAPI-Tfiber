@@ -61,6 +61,16 @@ def get_status(query: str) -> dict:
             graph_hostnames,
         )
 
+        monitoring_ambiguity = _monitoring_ambiguity_response(
+            intent=intent,
+            resolved=resolved,
+            devices=devices,
+            inventory_source=inventory_source,
+            resolver_warning=resolver_error,
+        )
+        if monitoring_ambiguity:
+            return monitoring_ambiguity
+
         if not devices:
             empty = aggregate_status(
                 entity_type=resolved.get("entity_type"),
@@ -135,20 +145,108 @@ def _ambiguous_response(resolved: dict) -> dict:
 
 def _resolve_or_fallback(intent) -> tuple[dict, str | None]:
     try:
-        return resolve_entity(intent.entity_name, intent.intent_type), None
+        resolved = resolve_entity(intent.entity_name, intent.intent_type)
+        if resolved.get("status") != "unresolved":
+            return resolved, None
+
+        return _status_api_fallback(intent), (
+            f"Neo4j did not resolve {intent.entity_name}; using Status API inventory"
+        )
     except Exception as exc:
-        return {
-            "status": "resolved",
-            "intent": intent.intent_type,
-            "entity_type": intent.entity_type,
-            "entity_name": intent.entity_name,
-            "lookup_type": "STATUS_API_FALLBACK",
-            "confidence": 0.5,
-            "scope_level": _scope_for_entity_type(intent.entity_type),
-            "requires_monitoring": True,
-            "requires_topology": False,
-            "context": {},
-        }, f"Neo4j resolver unavailable: {exc}"
+        return _status_api_fallback(intent), f"Neo4j resolver unavailable: {exc}"
+
+
+def _status_api_fallback(intent) -> dict:
+    return {
+        "status": "resolved",
+        "intent": intent.intent_type,
+        "entity_type": intent.entity_type,
+        "entity_name": intent.entity_name,
+        "lookup_type": "STATUS_API_FALLBACK",
+        "confidence": 0.5,
+        "scope_level": _scope_for_entity_type(intent.entity_type),
+        "requires_monitoring": True,
+        "requires_topology": False,
+        "context": {},
+    }
+
+
+def _monitoring_ambiguity_response(
+    intent,
+    resolved: dict,
+    devices: list[dict],
+    inventory_source: str,
+    resolver_warning: str | None,
+) -> dict | None:
+    if intent.entity_type != "IP" or len(devices) < 2:
+        return None
+
+    candidates = []
+    seen = set()
+    for device in devices:
+        candidate = _monitoring_candidate(device)
+        identity = (
+            candidate.get("serial_number"),
+            candidate.get("hostname"),
+            candidate.get("location"),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        candidates.append(candidate)
+
+    if len(candidates) < 2:
+        return None
+
+    return {
+        "success": False,
+        "status": "AMBIGUOUS",
+        "intent": _intent_payload(intent),
+        "resolver_context": _resolver_context(resolved),
+        "resolver_warning": resolver_warning,
+        "inventory_source": inventory_source,
+        "candidates": candidates,
+        "error": (
+            f"Multiple devices found for IP {intent.entity_name}. "
+            "Specify a hostname, serial number, or LGD code."
+        ),
+    }
+
+
+def _monitoring_candidate(device: dict) -> dict:
+    return {
+        "hostname": (
+            device.get("hostname")
+            or device.get("Hostname")
+            or device.get("DisplayName")
+            or device.get("LOGICAL_NAME")
+            or device.get("networkname")
+        ),
+        "device_type": (
+            device.get("ConfigurationItemType")
+            or device.get("ConfigurationItemSubType")
+            or device.get("device_type")
+        ),
+        "serial_number": (
+            device.get("SerialNumber")
+            or device.get("serial_number")
+            or device.get("serial")
+        ),
+        "ip_address": (
+            device.get("IPAddress")
+            or device.get("ip_address")
+            or device.get("ip")
+        ),
+        "district": device.get("DISTRICT") or device.get("District"),
+        "mandal": (
+            device.get("BLOCK")
+            or device.get("Block")
+            or device.get("MANDAL")
+            or device.get("Mandal")
+        ),
+        "location": device.get("LOCATION") or device.get("Location"),
+        "status": device.get("SystemDown", "UNKNOWN"),
+    }
 
 
 def _scope_for_entity_type(entity_type: str) -> str:

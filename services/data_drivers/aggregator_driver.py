@@ -3,6 +3,29 @@ from collections import Counter
 from services.data_drivers.monitoring_driver import classify_device_type
 
 
+# ---------------------------------------------------------------------------
+# Location hierarchy rules used by district summaries
+#
+# Status API mapping:
+#   DISTRICT -> district
+#   BLOCK    -> mandal
+#   GPNAME   -> gram panchayat (the primary location)
+#
+# These markers are placeholders rather than real hierarchy names, so they
+# must not increase the district's mandal or gram-panchayat totals.
+# ---------------------------------------------------------------------------
+INVALID_LOCATION_VALUES = {
+    "",
+    "-",
+    "NA",
+    "N/A",
+    "NAN",
+    "NONE",
+    "NULL",
+    "UNKNOWN",
+}
+
+
 def aggregate_status(
     entity_type: str,
     entity_name: str,
@@ -11,7 +34,7 @@ def aggregate_status(
     affected_services: int = 0,
 ) -> dict:
     if not devices:
-        return {
+        empty_status = {
             "entity_type": entity_type,
             "entity_name": entity_name,
             "scope": scope,
@@ -26,6 +49,13 @@ def aggregate_status(
             "top_issues": ["No devices found"],
             "recommended_actions": ["Verify inventory mapping in Neo4j"],
         }
+
+        # Pointer: keep the district response shape stable even when its
+        # inventory is empty; both hierarchy counts correctly become zero.
+        if _is_district_scope(entity_type, scope):
+            empty_status["location_summary"] = _district_location_summary([])
+
+        return empty_status
 
     total = len(devices)
     up = sum(1 for device in devices if _system_state(device) == "UP")
@@ -42,7 +72,7 @@ def aggregate_status(
     device_breakdown = _device_breakdown(devices)
     overall_health = _overall_health(total, down, unknown)
 
-    return {
+    status = {
         "entity_type": entity_type,
         "entity_name": entity_name,
         "scope": scope,
@@ -62,6 +92,71 @@ def aggregate_status(
             critical_alerts=critical_alerts,
         ),
     }
+
+    # Pointer: hierarchy totals belong only to a district response. Mandal,
+    # location, and device responses retain their existing compact payloads.
+    if _is_district_scope(entity_type, scope):
+        status["location_summary"] = _district_location_summary(devices)
+
+    return status
+
+
+def _is_district_scope(entity_type: str, scope: str) -> bool:
+    """Return True when either resolver field identifies district scope."""
+    return any(
+        str(value or "").strip().upper() == "DISTRICT"
+        for value in (entity_type, scope)
+    )
+
+
+def _district_location_summary(devices: list[dict]) -> dict[str, int]:
+    """Count unique mandals and gram panchayats represented by devices.
+
+    A Status API row represents a device, so the same BLOCK and GPNAME can
+    appear many times. Sets turn those repeated device rows into location
+    counts. A GP is keyed by (BLOCK, GPNAME), because the same GP name may
+    legitimately occur below two different mandals.
+    """
+    mandals: set[str] = set()
+    gram_panchayats: set[tuple[str, str]] = set()
+
+    for device in devices:
+        mandal = _first_location_value(
+            device,
+            ("BLOCK", "Block", "MANDAL", "Mandal"),
+        )
+        gp_name = _first_location_value(
+            device,
+            ("GPNAME", "GPName", "gp_name"),
+        )
+
+        if mandal:
+            mandals.add(mandal)
+
+        if gp_name:
+            # Pointer: an empty mandal is retained as a neutral parent so a
+            # valid GPNAME is still counted when a source row lacks BLOCK.
+            gram_panchayats.add((mandal or "", gp_name))
+
+    return {
+        "total_mandals": len(mandals),
+        "total_gram_panchayats": len(gram_panchayats),
+    }
+
+
+def _first_location_value(device: dict, fields: tuple[str, ...]) -> str | None:
+    """Read the first usable hierarchy value and normalize it for counting."""
+    for field in fields:
+        normalized = _normalize_location_value(device.get(field))
+        if normalized:
+            return normalized
+    return None
+
+
+def _normalize_location_value(value) -> str | None:
+    """Collapse whitespace/case differences and reject placeholder values."""
+    normalized = " ".join(str(value or "").split()).upper()
+    return None if normalized in INVALID_LOCATION_VALUES else normalized
 
 
 def _system_state(device: dict) -> str:

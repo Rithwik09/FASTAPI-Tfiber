@@ -44,6 +44,12 @@ class DeviceBreakdown(BaseModel):
     Other: int = 0
 
 
+class LocationSummary(BaseModel):
+    """District hierarchy counts derived from Status API inventory rows."""
+    total_mandals: int = 0
+    total_gram_panchayats: int = 0
+
+
 class AggregatedStatus(BaseModel):
     """Compressed status summary for LLM"""
     entity_type: str  # DISTRICT, MANDAL, LOCATION, DEVICE, IP, SERVICE
@@ -56,6 +62,8 @@ class AggregatedStatus(BaseModel):
     critical_alerts: int
     affected_services: int
     device_breakdown: DeviceBreakdown
+    # Present for DISTRICT scope; omitted from smaller scope responses.
+    location_summary: Optional[LocationSummary] = None
     top_issues: List[str] = []
     recommended_actions: List[str] = []
 

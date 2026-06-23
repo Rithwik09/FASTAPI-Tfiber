@@ -1,10 +1,16 @@
 DEVICE_SCOPE_FIELDS = (
     "hostname",
     "Hostname",
+    "DisplayName",
+    "LOGICAL_NAME",
+    "networkname",
     "SystemDown",
     "Status",
     "IPAddress",
     "ip_address",
+    "SerialNumber",
+    "ConfigurationItemType",
+    "ConfigurationItemSubType",
     "LOCATION",
     "DISTRICT",
     "BLOCK",
@@ -28,10 +34,14 @@ def compress_status(
 
 
 def _compress_summary_scope(resolved: dict, aggregated: dict) -> dict:
+    # Pointer: this allow-list keeps broad-scope responses compact. District
+    # hierarchy counts are already aggregated, so exposing location_summary
+    # adds useful context without returning individual inventory records.
     allowed = {
         "entity_type",
         "entity_name",
         "scope",
+        "location_summary",
         "overall_health",
         "total_devices",
         "devices_up",
@@ -70,6 +80,9 @@ def _compress_device_scope(
     hostname = (
         compressed_device.get("hostname")
         or compressed_device.get("Hostname")
+        or compressed_device.get("DisplayName")
+        or compressed_device.get("LOGICAL_NAME")
+        or compressed_device.get("networkname")
         or resolved.get("entity_name")
     )
 
